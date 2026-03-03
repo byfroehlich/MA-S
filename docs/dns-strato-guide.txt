@@ -1,0 +1,16 @@
+Strato DNS -> Vercel (typical)
+
+In Vercel:
+  Project -> Settings -> Domains -> Add domain
+  Vercel shows the exact DNS records to set.
+
+In Strato DNS:
+  - For apex/root (example.com):
+      A record to Vercel IP (as shown by Vercel) OR ALIAS if available.
+  - For www:
+      CNAME to cname.vercel-dns.com (or as shown by Vercel)
+  - Wait for propagation. SSL is automatic in Vercel.
+
+Tip:
+  Use either root OR www as primary and redirect the other in Vercel domains settings.
+

@@ -1,0 +1,29 @@
+MA:S Landing — Deploy Guide (Vercel + Next.js)
+
+1) Install
+   npm install
+   npm run dev
+
+2) Update config
+   Edit: lib/site.ts
+     - domain: your-domain.tld
+     - appUrl: your app link (later)
+     - bookAmazonUrl: your Amazon ASIN link
+
+3) GitHub
+   git init
+   git add .
+   git commit -m "MA:S landing"
+   git branch -M main
+   git remote add origin https://github.com/<you>/mas-landing.git
+   git push -u origin main
+
+4) Vercel
+   - New Project -> Import Git repo -> Deploy
+   - Add custom domain in Vercel project settings when ready
+
+Routes:
+  /de  German landing
+  /en  English landing
+Root / redirects to /de via middleware.
+
