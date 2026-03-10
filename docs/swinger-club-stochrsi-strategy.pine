@@ -1,15 +1,19 @@
 // ============================================================================
 // SWINGER CLUB - StochRSI Strategy
 // ============================================================================
-// Timeframe  : 4H
+// Timeframe  : 4H (Arming/Setup) + 10min intrabar (Entry & Exit)
 // Indicator  : Stochastic RSI (14 / 14 / 3 / 3)
 //
-// LONG ENTRY : K crosses D bullish (BOTH < 20) → K then crosses 20 upward
-// LONG EXIT  : K crosses D downward (anywhere)
-// SHORT ENTRY: K crosses D bearish (BOTH > 80) → K then crosses 80 downward
-// SHORT EXIT : K crosses D upward (anywhere)
-// STOP LOSS  : 2% from entry (Long: -2% / Short: +2%)
-// SIZING     : 100% equity × Leverage (Zinseszins / compounding)
+// LONG  SETUP : K crosses D bullish while BOTH < 20 auf 4H  → armed
+// LONG  ENTRY : K crosses 20 aufwärts auf 10min (intrabar)
+// LONG  EXIT  : K crosses D abwärts   auf 10min (intrabar)
+//
+// SHORT SETUP : K crosses D bearish while BOTH > 80 auf 4H  → armed
+// SHORT ENTRY : K crosses 80 abwärts  auf 10min (intrabar)
+// SHORT EXIT  : K crosses D aufwärts  auf 10min (intrabar)
+//
+// STOP LOSS   : 2% vom Entry
+// SIZING      : 100% equity × Leverage (Zinseszins / compounding)
 // ============================================================================
 
 //@version=6
@@ -32,6 +36,9 @@ rsiLen    = input.int(14,  "RSI Length",   minval=1,   group=grpStoch)
 stochLen  = input.int(14,  "Stoch Length", minval=1,   group=grpStoch)
 kSmooth   = input.int(3,   "K Smoothing",  minval=1,   group=grpStoch)
 dSmooth   = input.int(3,   "D Smoothing",  minval=1,   group=grpStoch)
+ltfInput  = input.timeframe("10", "Intrabar TF",
+     tooltip = "Lower TF für intrabar Entry/Exit (z.B. '10' = 10min, '5' = 5min)",
+     group   = grpStoch)
 
 grpRisk   = "Risk Management"
 slPct     = input.float(2.0, "Stop Loss %",   minval=0.1, step=0.1, group=grpRisk)
@@ -39,70 +46,121 @@ leverage  = input.int(1,     "Leverage (x)",  minval=1, maxval=100, step=1,
              tooltip="Backtest: 1 = kein Hebel. Für Live-Trading auf 8 setzen.",
              group=grpRisk)
 
-// ─── STOCHRSI CALCULATION ────────────────────────────────────────────────────
+// ─── STOCHRSI — Main TF (Arming / Setup-Erkennung auf 4H) ────────────────────
 rsi = ta.rsi(close, rsiLen)
 k   = ta.sma(ta.stoch(rsi, rsi, rsi, stochLen), kSmooth)
 d   = ta.sma(k, dSmooth)
 
-// ─── POSITION SIZE (Zinseszins + Leverage) ───────────────────────────────────
-// Full equity × leverage, converted to number of units at current price.
-// As equity grows from profits, each new position grows automatically.
-qtyLong  = (strategy.equity * leverage) / close
-qtyShort = (strategy.equity * leverage) / close
+// ─── STOCHRSI — Lower TF (intrabar arrays für Entry/Exit) ────────────────────
+// UDFs werden im LTF-Kontext ausgewertet; `close` = LTF-Close
+f_k() =>
+    _r = ta.rsi(close, rsiLen)
+    ta.sma(ta.stoch(_r, _r, _r, stochLen), kSmooth)
 
-// ─── ENTRY LOGIC ─────────────────────────────────────────────────────────────
-// LONG
-// Step 1: K crosses D bullish while BOTH are below 20 → arm trigger
-// Step 2: K crosses 20 upward                         → ENTRY
-var bool longArmed = false
+f_d() =>
+    _r = ta.rsi(close, rsiLen)
+    _k = ta.sma(ta.stoch(_r, _r, _r, stochLen), kSmooth)
+    ta.sma(_k, dSmooth)
 
-if ta.crossover(k, d) and k < 20 and d < 20
+kBars = request.security_lower_tf(syminfo.tickerid, ltfInput, f_k(),
+     lookahead = barmerge.lookahead_off,
+     gaps      = barmerge.gaps_off)
+dBars = request.security_lower_tf(syminfo.tickerid, ltfInput, f_d(),
+     lookahead = barmerge.lookahead_off,
+     gaps      = barmerge.gaps_off)
+
+// ─── INTRABAR CROSS DETECTION ────────────────────────────────────────────────
+// prevK/prevD = letzte LTF-Werte des vorigen HTF-Bars
+// → ermöglicht Cross-Erkennung am Übergang zweier HTF-Bars (kein Signal-Verlust)
+var float prevK = na
+var float prevD = na
+
+bool longCross20  = false   // K kreuzt 20 aufwärts   → Long Entry Trigger
+bool shortCross80 = false   // K kreuzt 80 abwärts    → Short Entry Trigger
+bool ltfLongExit  = false   // KD-Crossunder auf LTF  → Long Exit
+bool ltfShortExit = false   // KD-Crossover  auf LTF  → Short Exit
+
+n = array.size(kBars)
+
+for i = 0 to n - 1
+    float kCurr = array.get(kBars, i)
+    float dCurr = array.get(dBars, i)
+    float kPrev = i == 0 ? prevK : array.get(kBars, i - 1)
+    float dPrev = i == 0 ? prevD : array.get(dBars, i - 1)
+
+    if not na(kPrev)
+        // Long Entry: K kreuzt 20 aufwärts
+        if kPrev < 20 and kCurr >= 20
+            longCross20  := true
+        // Short Entry: K kreuzt 80 abwärts
+        if kPrev > 80 and kCurr <= 80
+            shortCross80 := true
+        // Long Exit: KD-Crossunder
+        if kPrev >= dPrev and kCurr < dCurr
+            ltfLongExit  := true
+        // Short Exit: KD-Crossover
+        if kPrev <= dPrev and kCurr > dCurr
+            ltfShortExit := true
+
+// Letzte LTF-Werte sichern (für nächsten HTF-Bar als kPrev/dPrev)
+if n > 0
+    prevK := array.last(kBars)
+    prevD := array.last(dBars)
+
+// ─── ARMING LOGIC (Main TF — 4H Bar Close) ───────────────────────────────────
+var bool longArmed  = false
+var bool shortArmed = false
+
+// LONG ARM: KD-Crossover, wobei VORHERIGER Bar k[1]/d[1] < 20
+// → Fix: k[1] statt k verhindert den "Rocket-Bar"-Bug
+// (K schießt auf einem Bar durch D UND 20 → arm wäre bei k<20 false)
+bool justArmedLong = ta.crossover(k, d) and k[1] < 20 and d[1] < 20
+if justArmedLong
     longArmed := true
 
-if ta.crossunder(k, d)          // reverse cross → disarm
+// Disarm: intrabar KD-Cross oder HTF-Crossunder
+// `not justArmedLong` verhindert sofortigen Disarm nach Arming auf gleichem Bar
+if not justArmedLong and (ltfLongExit or ta.crossunder(k, d))
     longArmed := false
 
-longEntry = longArmed and ta.crossover(k, 20)
-
+longEntry = longArmed and longCross20
 if longEntry
     longArmed := false
 
-// SHORT
-// Step 1: K crosses D bearish while BOTH are above 80 → arm trigger
-// Step 2: K crosses 80 downward                       → ENTRY
-var bool shortArmed = false
-
-if ta.crossunder(k, d) and k > 80 and d > 80
+// SHORT ARM: KD-Crossunder, wobei VORHERIGER Bar k[1]/d[1] > 80
+bool justArmedShort = ta.crossunder(k, d) and k[1] > 80 and d[1] > 80
+if justArmedShort
     shortArmed := true
 
-if ta.crossover(k, d)           // reverse cross → disarm
+if not justArmedShort and (ltfShortExit or ta.crossover(k, d))
     shortArmed := false
 
-shortEntry = shortArmed and ta.crossunder(k, 80)
-
+shortEntry = shortArmed and shortCross80
 if shortEntry
     shortArmed := false
 
-// ─── EXIT LOGIC ──────────────────────────────────────────────────────────────
-// Next opposing K/D crossover — no level requirement
-longExit  = ta.crossunder(k, d) and strategy.position_size > 0
-shortExit = ta.crossover(k, d)  and strategy.position_size < 0
+// ─── EXIT SIGNALS ────────────────────────────────────────────────────────────
+longExit  = ltfLongExit  and strategy.position_size > 0
+shortExit = ltfShortExit and strategy.position_size < 0
+
+// ─── POSITION SIZE (Zinseszins + Leverage) ───────────────────────────────────
+qtyLong  = (strategy.equity * leverage) / close
+qtyShort = (strategy.equity * leverage) / close
 
 // ─── STRATEGY EXECUTION ──────────────────────────────────────────────────────
 if longEntry
-    strategy.entry("Long", strategy.long, qty=qtyLong, comment="Long Entry")
+    strategy.entry("Long",  strategy.long,  qty=qtyLong,  comment="Long Entry")
 
 if shortEntry
     strategy.entry("Short", strategy.short, qty=qtyShort, comment="Short Entry")
 
-// Signal exits
 if longExit
-    strategy.close("Long", comment="KD Cross Exit")
+    strategy.close("Long",  comment="KD Cross Exit")
 
 if shortExit
     strategy.close("Short", comment="KD Cross Exit")
 
-// Stop Loss — placed as resting order after each entry
+// Stop Loss — resting order, aktualisiert sich mit equity
 strategy.exit("Long SL",  from_entry="Long",  stop=strategy.position_avg_price * (1 - slPct / 100))
 strategy.exit("Short SL", from_entry="Short", stop=strategy.position_avg_price * (1 + slPct / 100))
 
@@ -114,43 +172,48 @@ hline(80, "Overbought", color=color.new(color.red,   30), linestyle=hline.style_
 hline(20, "Oversold",   color=color.new(color.green, 30), linestyle=hline.style_dashed, linewidth=1)
 hline(50, "Mid",        color=color.new(color.gray,  50), linestyle=hline.style_dotted, linewidth=1)
 
-// Entry flash (background color on signal bar)
 bgcolor(longEntry  ? color.new(color.green, 75) : na, title="Long Entry Flash")
 bgcolor(shortEntry ? color.new(color.red,   75) : na, title="Short Entry Flash")
 
-// Entry arrows
-plotshape(longEntry,  title="Long Signal",  style=shape.triangleup,   location=location.bottom, color=color.green, size=size.small)
-plotshape(shortEntry, title="Short Signal", style=shape.triangledown, location=location.top,    color=color.red,   size=size.small)
+plotshape(longEntry,  title="Long Signal",  style=shape.triangleup,
+     location=location.bottom, color=color.green, size=size.small)
+plotshape(shortEntry, title="Short Signal", style=shape.triangledown,
+     location=location.top,    color=color.red,   size=size.small)
 
-// Armed state dots (trigger is set, waiting for level cross)
-plotshape(longArmed  and not longEntry,  title="Long Armed",  style=shape.circle, location=location.bottom, color=color.new(color.green, 50), size=size.tiny)
-plotshape(shortArmed and not shortEntry, title="Short Armed", style=shape.circle, location=location.top,    color=color.new(color.red,   50), size=size.tiny)
+plotshape(longArmed  and not longEntry,  title="Long Armed",
+     style=shape.circle, location=location.bottom,
+     color=color.new(color.green, 50), size=size.tiny)
+plotshape(shortArmed and not shortEntry, title="Short Armed",
+     style=shape.circle, location=location.top,
+     color=color.new(color.red,   50), size=size.tiny)
 
-// ─── LEVERAGE INFO LABEL ─────────────────────────────────────────────────────
-var table infoTable = table.new(position.top_right, 2, 3,
+// ─── INFO TABLE ──────────────────────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 4,
      bgcolor=color.new(color.black, 70), border_width=1)
 
 if barstate.islast
-    table.cell(infoTable, 0, 0, "Leverage",   text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 0, 0, "Leverage",    text_color=color.gray,  text_size=size.small)
     table.cell(infoTable, 1, 0, str.tostring(leverage) + "x",
          text_color=leverage > 1 ? color.orange : color.white, text_size=size.small)
-    table.cell(infoTable, 0, 1, "Stop Loss",  text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 0, 1, "Stop Loss",   text_color=color.gray,  text_size=size.small)
     table.cell(infoTable, 1, 1, str.tostring(slPct) + "%",
          text_color=color.red,   text_size=size.small)
-    table.cell(infoTable, 0, 2, "Equity",     text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 0, 2, "Equity",      text_color=color.gray,  text_size=size.small)
     table.cell(infoTable, 1, 2, "$" + str.tostring(math.round(strategy.equity, 2)),
          text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Intrabar TF", text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 1, 3, ltfInput + "min",
+         text_color=color.white, text_size=size.small)
 
 // ─── WEBHOOK ALERT CONDITIONS ────────────────────────────────────────────────
-// In TradingView: Alerts → Create Alert → wähle die jeweilige Condition
-// Webhook URL: deine Broker-Integration (Tastytrade o.ä.)
-//
-// JSON-Payload Struktur (anpassbar je nach Broker-API):
-//   Long  Entry : {"action":"buy", "symbol":"{{ticker}}", "price":"{{close}}", "qty":"{{strategy.order.contracts}}", "time":"{{timenow}}"}
-//   Short Entry : {"action":"sell","symbol":"{{ticker}}", "price":"{{close}}", "qty":"{{strategy.order.contracts}}", "time":"{{timenow}}"}
-//   Exit        : {"action":"close","symbol":"{{ticker}}","price":"{{close}}", "time":"{{timenow}}"}
+// In TradingView: Alerts → Create Alert → jeweilige Condition wählen
+// Alerts feuern intrabar (auf dem 10min-Bar), nicht erst beim 4H-Close
 
-alertcondition(longEntry,  title="LONG Entry",  message='{"action":"buy","symbol":"{{ticker}}","price":"{{close}}","qty":"{{strategy.order.contracts}}","time":"{{timenow}}"}')
-alertcondition(shortEntry, title="SHORT Entry", message='{"action":"sell","symbol":"{{ticker}}","price":"{{close}}","qty":"{{strategy.order.contracts}}","time":"{{timenow}}"}')
-alertcondition(longExit,   title="LONG Exit",   message='{"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
-alertcondition(shortExit,  title="SHORT Exit",  message='{"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
+alertcondition(longEntry,  title="LONG Entry",
+     message='{"action":"buy","symbol":"{{ticker}}","price":"{{close}}","qty":"{{strategy.order.contracts}}","time":"{{timenow}}"}')
+alertcondition(shortEntry, title="SHORT Entry",
+     message='{"action":"sell","symbol":"{{ticker}}","price":"{{close}}","qty":"{{strategy.order.contracts}}","time":"{{timenow}}"}')
+alertcondition(longExit,   title="LONG Exit",
+     message='{"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
+alertcondition(shortExit,  title="SHORT Exit",
+     message='{"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
