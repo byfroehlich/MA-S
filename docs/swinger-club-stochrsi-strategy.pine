@@ -1,24 +1,24 @@
 // ============================================================================
 // SWINGER CLUB - StochRSI Strategy
 // ============================================================================
-// Timeframe : 4H
-// Indicator : Stochastic RSI
+// Timeframe  : 4H
+// Indicator  : Stochastic RSI (14 / 14 / 3 / 3)
 //
-// LONG ENTRY  : K crosses D bullish (both < 20) → K then crosses 20 upward
-// LONG EXIT   : K crosses D downward (anywhere)
-// SHORT ENTRY : K crosses D bearish (both > 80) → K then crosses 80 downward
-// SHORT EXIT  : K crosses D upward (anywhere)
-// STOP LOSS   : 2% from entry price
-// SIZING      : 100% of equity (auto-compounding)
+// LONG ENTRY : K crosses D bullish (BOTH < 20) → K then crosses 20 upward
+// LONG EXIT  : K crosses D downward (anywhere)
+// SHORT ENTRY: K crosses D bearish (BOTH > 80) → K then crosses 80 downward
+// SHORT EXIT : K crosses D upward (anywhere)
+// STOP LOSS  : 2% from entry (Long: -2% / Short: +2%)
+// SIZING     : 100% equity × Leverage (Zinseszins / compounding)
 // ============================================================================
 
-//@version=5
+//@version=6
 strategy(
      title              = "Swinger Club - StochRSI",
      shorttitle         = "SC-StochRSI",
      overlay            = false,
-     default_qty_type   = strategy.percent_of_equity,
-     default_qty_value  = 100,
+     default_qty_type   = strategy.cash,
+     default_qty_value  = 0,
      initial_capital    = 10000,
      commission_type    = strategy.commission.percent,
      commission_value   = 0.1,
@@ -28,23 +28,32 @@ strategy(
 
 // ─── INPUTS ──────────────────────────────────────────────────────────────────
 grpStoch  = "StochRSI Settings"
-rsiLen    = input.int(14,   "RSI Length",    minval=1,   group=grpStoch)
-stochLen  = input.int(14,   "Stoch Length",  minval=1,   group=grpStoch)
-kSmooth   = input.int(3,    "K Smoothing",   minval=1,   group=grpStoch)
-dSmooth   = input.int(3,    "D Smoothing",   minval=1,   group=grpStoch)
+rsiLen    = input.int(14,  "RSI Length",   minval=1,   group=grpStoch)
+stochLen  = input.int(14,  "Stoch Length", minval=1,   group=grpStoch)
+kSmooth   = input.int(3,   "K Smoothing",  minval=1,   group=grpStoch)
+dSmooth   = input.int(3,   "D Smoothing",  minval=1,   group=grpStoch)
 
 grpRisk   = "Risk Management"
-slPct     = input.float(2.0, "Stop Loss %",  minval=0.1, step=0.1, group=grpRisk)
+slPct     = input.float(2.0, "Stop Loss %",   minval=0.1, step=0.1, group=grpRisk)
+leverage  = input.int(1,     "Leverage (x)",  minval=1, maxval=100, step=1,
+             tooltip="Backtest: 1 = kein Hebel. Für Live-Trading auf 8 setzen.",
+             group=grpRisk)
 
 // ─── STOCHRSI CALCULATION ────────────────────────────────────────────────────
 rsi = ta.rsi(close, rsiLen)
 k   = ta.sma(ta.stoch(rsi, rsi, rsi, stochLen), kSmooth)
 d   = ta.sma(k, dSmooth)
 
+// ─── POSITION SIZE (Zinseszins + Leverage) ───────────────────────────────────
+// Full equity × leverage, converted to number of units at current price.
+// As equity grows from profits, each new position grows automatically.
+qtyLong  = (strategy.equity * leverage) / close
+qtyShort = (strategy.equity * leverage) / close
+
 // ─── ENTRY LOGIC ─────────────────────────────────────────────────────────────
 // LONG
-// Step 1: K crosses D bullish while both are below 20 → arm the trigger
-// Step 2: K crosses 20 upward → ENTRY
+// Step 1: K crosses D bullish while BOTH are below 20 → arm trigger
+// Step 2: K crosses 20 upward                         → ENTRY
 var bool longArmed = false
 
 if ta.crossover(k, d) and k < 20 and d < 20
@@ -59,8 +68,8 @@ if longEntry
     longArmed := false
 
 // SHORT
-// Step 1: K crosses D bearish while both are above 80 → arm the trigger
-// Step 2: K crosses 80 downward → ENTRY
+// Step 1: K crosses D bearish while BOTH are above 80 → arm trigger
+// Step 2: K crosses 80 downward                       → ENTRY
 var bool shortArmed = false
 
 if ta.crossunder(k, d) and k > 80 and d > 80
@@ -75,25 +84,25 @@ if shortEntry
     shortArmed := false
 
 // ─── EXIT LOGIC ──────────────────────────────────────────────────────────────
-// Simply: next K/D cross in opposite direction
+// Next opposing K/D crossover — no level requirement
 longExit  = ta.crossunder(k, d) and strategy.position_size > 0
 shortExit = ta.crossover(k, d)  and strategy.position_size < 0
 
 // ─── STRATEGY EXECUTION ──────────────────────────────────────────────────────
 if longEntry
-    strategy.entry("Long", strategy.long, comment="Long Entry")
+    strategy.entry("Long", strategy.long, qty=qtyLong, comment="Long Entry")
 
 if shortEntry
-    strategy.entry("Short", strategy.short, comment="Short Entry")
+    strategy.entry("Short", strategy.short, qty=qtyShort, comment="Short Entry")
 
-// Signal-based exits
+// Signal exits
 if longExit
     strategy.close("Long", comment="KD Cross Exit")
 
 if shortExit
     strategy.close("Short", comment="KD Cross Exit")
 
-// Stop Loss orders (2% from avg entry price)
+// Stop Loss — placed as resting order after each entry
 strategy.exit("Long SL",  from_entry="Long",  stop=strategy.position_avg_price * (1 - slPct / 100))
 strategy.exit("Short SL", from_entry="Short", stop=strategy.position_avg_price * (1 + slPct / 100))
 
@@ -105,7 +114,7 @@ hline(80, "Overbought", color=color.new(color.red,   30), linestyle=hline.style_
 hline(20, "Oversold",   color=color.new(color.green, 30), linestyle=hline.style_dashed, linewidth=1)
 hline(50, "Mid",        color=color.new(color.gray,  50), linestyle=hline.style_dotted, linewidth=1)
 
-// Entry signals as background flash
+// Entry flash (background color on signal bar)
 bgcolor(longEntry  ? color.new(color.green, 75) : na, title="Long Entry Flash")
 bgcolor(shortEntry ? color.new(color.red,   75) : na, title="Short Entry Flash")
 
@@ -113,25 +122,35 @@ bgcolor(shortEntry ? color.new(color.red,   75) : na, title="Short Entry Flash")
 plotshape(longEntry,  title="Long Signal",  style=shape.triangleup,   location=location.bottom, color=color.green, size=size.small)
 plotshape(shortEntry, title="Short Signal", style=shape.triangledown, location=location.top,    color=color.red,   size=size.small)
 
-// Armed state indicator (small dot = trigger armed)
+// Armed state dots (trigger is set, waiting for level cross)
 plotshape(longArmed  and not longEntry,  title="Long Armed",  style=shape.circle, location=location.bottom, color=color.new(color.green, 50), size=size.tiny)
 plotshape(shortArmed and not shortEntry, title="Short Armed", style=shape.circle, location=location.top,    color=color.new(color.red,   50), size=size.tiny)
 
-// ─── WEBHOOK ALERT MESSAGES ──────────────────────────────────────────────────
-// Configure alerts in TradingView with these messages for your webhook:
-//
-// Long Entry Alert:
-//   {"action":"buy","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}
-//
-// Short Entry Alert:
-//   {"action":"sell","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}
-//
-// Exit Alert:
-//   {"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}
-//
-// Add these via: Right-click on strategy → Add Alert → set condition + message
+// ─── LEVERAGE INFO LABEL ─────────────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 3,
+     bgcolor=color.new(color.black, 70), border_width=1)
 
-alertcondition(longEntry,  title="LONG Entry",  message='{"action":"buy","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
-alertcondition(shortEntry, title="SHORT Entry", message='{"action":"sell","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Leverage",   text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(leverage) + "x",
+         text_color=leverage > 1 ? color.orange : color.white, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Stop Loss",  text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(slPct) + "%",
+         text_color=color.red,   text_size=size.small)
+    table.cell(infoTable, 0, 2, "Equity",     text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 1, 2, "$" + str.tostring(math.round(strategy.equity, 2)),
+         text_color=color.green, text_size=size.small)
+
+// ─── WEBHOOK ALERT CONDITIONS ────────────────────────────────────────────────
+// In TradingView: Alerts → Create Alert → wähle die jeweilige Condition
+// Webhook URL: deine Broker-Integration (Tastytrade o.ä.)
+//
+// JSON-Payload Struktur (anpassbar je nach Broker-API):
+//   Long  Entry : {"action":"buy", "symbol":"{{ticker}}", "price":"{{close}}", "qty":"{{strategy.order.contracts}}", "time":"{{timenow}}"}
+//   Short Entry : {"action":"sell","symbol":"{{ticker}}", "price":"{{close}}", "qty":"{{strategy.order.contracts}}", "time":"{{timenow}}"}
+//   Exit        : {"action":"close","symbol":"{{ticker}}","price":"{{close}}", "time":"{{timenow}}"}
+
+alertcondition(longEntry,  title="LONG Entry",  message='{"action":"buy","symbol":"{{ticker}}","price":"{{close}}","qty":"{{strategy.order.contracts}}","time":"{{timenow}}"}')
+alertcondition(shortEntry, title="SHORT Entry", message='{"action":"sell","symbol":"{{ticker}}","price":"{{close}}","qty":"{{strategy.order.contracts}}","time":"{{timenow}}"}')
 alertcondition(longExit,   title="LONG Exit",   message='{"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
 alertcondition(shortExit,  title="SHORT Exit",  message='{"action":"close","symbol":"{{ticker}}","price":"{{close}}","time":"{{timenow}}"}')
